@@ -23,7 +23,7 @@ impl IrcClient {
     pub async fn connect(&mut self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr).await?;
-        println!("Connected to {}", &addr);
+        println!("Connected to {}", addr);
 
         // Spawn background task to process incoming data
         let (mut reader, mut writer) = stream.into_split();
