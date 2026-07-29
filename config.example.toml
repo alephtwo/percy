@@ -1,0 +1,5 @@
+[irc]
+host = "irc.rizon.net"
+port = 6667
+real_name = "John Smith"
+nick = "johnsmith"

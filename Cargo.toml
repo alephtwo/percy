@@ -7,4 +7,6 @@ edition = "2024"
 anyhow = "1.0.104"
 clap = { version = "4.6.4", features = ["cargo", "derive"] }
 owo-colors = "4.3.0"
+serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal"] }
+toml = "1.1.4"

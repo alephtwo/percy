@@ -10,6 +10,7 @@ pub struct IrcClient {
     port: u16,
     nick: String,
     real_name: String,
+    #[allow(dead_code)]
     connected: bool,
 }
 
