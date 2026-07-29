@@ -1,8 +1,7 @@
 use anyhow::Result;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 /// Represents an IRC client for connecting to an IRC server.
 pub struct IrcClient {
@@ -20,61 +19,78 @@ impl IrcClient {
         IrcClientBuilder::default()
     }
 
-    pub async fn connect(&mut self) -> Result<()> {
+    /// Connects to the IRC server and returns an async Receiver channel end.
+    /// The background task emits events (Connected, Message, Ping, Error, Closed)
+    /// through this channel.
+    pub async fn connect(&self) -> Result<mpsc::Receiver<IrcEvent>> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr).await?;
-        println!("Connected to {}", addr);
 
-        // Spawn background task to process incoming data
-        let (mut reader, mut writer) = stream.into_split();
+        // 1. Create channel with capacity for 100 buffered events
+        let (tx, rx) = mpsc::channel::<IrcEvent>(100);
 
-        // Pass initial payload
-        let message = format!(
+        // 2. Split TCP stream into reader and writer halves
+        let (reader, mut writer) = stream.into_split();
+
+        // 3. Send initial IRC registration payload
+        let init_msg = format!(
             "NICK {}\r\nUSER guest 0 * :{}\r\n",
             self.nick, self.real_name
         );
-        writer.write_all(message.as_bytes()).await?;
+        writer.write_all(init_msg.as_bytes()).await?;
 
-        // Process incoming data
+        // 4. Emit the initial 'Connected' event
+        let _ = tx.send(IrcEvent::Connected).await;
+
+        // 5. Spawn background reader task to process incoming TCP data
         tokio::spawn(async move {
-            let mut buffer = [0u8; 1024];
-
+            let mut lines = BufReader::new(reader).lines();
             loop {
-                match reader.read(&mut buffer).await {
-                    Ok(n) if n > 0 => {
-                        let text = String::from_utf8_lossy(&buffer[..n]);
-                        println!("[DEBUG] Incoming: {}", text.trim_end());
-                        // Split incoming stream by lines to parse individual commands
-                        for line in text.lines() {
-                            // Check if the server sent a PING request
-                            if line.starts_with("PING") {
-                                // Extract the ping payload (e.g., ":2148117722")
-                                if let Some(payload) = line.strip_prefix("PING ") {
-                                    let pong_msg = format!("PONG {}\r\n", payload);
-                                    print!("[DEBUG] Outgoing: {}", pong_msg);
+                match lines.next_line().await {
+                    // EVENT: Line received from server
+                    Ok(Some(line)) => {
+                        // Check for PING request
+                        if line.starts_with("PING") {
+                            if let Some(payload) = line.strip_prefix("PING ") {
+                                let payload_str = payload.to_string();
 
-                                    // Send auto-PONG response back to server
-                                    if let Err(e) = writer.write_all(pong_msg.as_bytes()).await {
-                                        eprintln!("[ERROR] Failed to send PONG: {}", e);
-                                        break;
-                                    }
+                                // Emit Ping event to user event loop
+                                if tx.send(IrcEvent::Ping(payload_str.clone())).await.is_err() {
+                                    // Receiver was dropped by the main application thread
+                                    break;
+                                }
+
+                                // Send auto-PONG reply back to IRC server
+                                let pong_msg = format!("PONG {}\r\n", payload_str);
+                                if let Err(e) = writer.write_all(pong_msg.as_bytes()).await {
+                                    let _ = tx.send(IrcEvent::Error(e.to_string())).await;
+                                    break;
                                 }
                             }
+                            continue;
+                        }
+
+                        // Emit standard message event
+                        if tx.send(IrcEvent::Message(line)).await.is_err() {
+                            break;
                         }
                     }
-                    Ok(_) => {
-                        println!("[DEBUG] Disconnected from server.");
+                    // EVENT: Connection closed gracefully by remote end
+                    Ok(None) => {
+                        let _ = tx.send(IrcEvent::Closed).await;
                         break;
                     }
+                    // EVENT: Socket I/O error
                     Err(err) => {
-                        eprintln!("[ERROR] Socket error: {}", err);
+                        let _ = tx.send(IrcEvent::Error(err.to_string())).await;
+                        let _ = tx.send(IrcEvent::Closed).await;
                         break;
                     }
                 }
             }
         });
 
-        Ok(())
+        Ok(rx)
     }
 }
 
@@ -137,4 +153,13 @@ impl IrcClientBuilder {
             connected: false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum IrcEvent {
+    Connected,
+    Message(String),
+    Ping(String),
+    Error(String),
+    Closed,
 }
