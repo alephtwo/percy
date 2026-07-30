@@ -9,89 +9,155 @@ pub struct IrcClient {
     port: u16,
     nick: String,
     real_name: String,
-    #[allow(dead_code)]
     connected: bool,
 }
 
 impl IrcClient {
-    /// Gets a builder for creating an [`IrcClient`].
+    /// Creates a builder to configure and construct an [`IrcClient`].
     pub fn builder() -> IrcClientBuilder {
         IrcClientBuilder::default()
     }
 
-    /// Connects to the IRC server and returns an async Receiver channel end.
-    /// The background task emits events (Connected, Message, Ping, Error, Closed)
-    /// through this channel.
-    pub async fn connect(&self) -> Result<mpsc::Receiver<IrcEvent>> {
+    /// Connects to the IRC server and spawns the background processing task.
+    ///
+    /// Returns a tuple containing:
+    /// - An active command handle (`IrcClientHandle`) to send commands (JOIN, PRIVMSG, etc.).
+    /// - An `mpsc::Receiver<IrcEvent>` to listen to incoming events from the server.
+    pub async fn connect(&mut self) -> Result<(IrcClientHandle, mpsc::Receiver<IrcEvent>)> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr).await?;
-
-        // 1. Create channel with capacity for 100 buffered events
-        let (tx, rx) = mpsc::channel::<IrcEvent>(100);
-
-        // 2. Split TCP stream into reader and writer halves
         let (reader, mut writer) = stream.into_split();
 
-        // 3. Send initial IRC registration payload
-        let init_msg = format!(
-            "NICK {}\r\nUSER guest 0 * :{}\r\n",
-            self.nick, self.real_name
-        );
-        writer.write_all(init_msg.as_bytes()).await?;
+        // Channel for outgoing command lines to the TCP writer task
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<String>(100);
+        // Channel for incoming IRC events emitted to the caller
+        let (event_tx, event_rx) = mpsc::channel::<IrcEvent>(100);
 
-        // 4. Emit the initial 'Connected' event
-        let _ = tx.send(IrcEvent::Connected).await;
+        // Perform initial registration handshake
+        writer
+            .write_all(format!("NICK {}\r\n", self.nick).as_bytes())
+            .await?;
+        writer
+            .write_all(format!("USER {} 0 * :{}\r\n", self.nick, self.real_name).as_bytes())
+            .await?;
 
-        // 5. Spawn background reader task to process incoming TCP data
+        self.connected = true;
+        let nick = self.nick.clone();
+
+        // Spawn background reader/writer loop
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
+
             loop {
-                match lines.next_line().await {
-                    // EVENT: Line received from server
-                    Ok(Some(line)) => {
-                        // Check for PING request
-                        if line.starts_with("PING") {
-                            if let Some(payload) = line.strip_prefix("PING ") {
-                                let payload_str = payload.to_string();
-
-                                // Emit Ping event to user event loop
-                                if tx.send(IrcEvent::Ping(payload_str.clone())).await.is_err() {
-                                    // Receiver was dropped by the main application thread
-                                    break;
-                                }
-
-                                // Send auto-PONG reply back to IRC server
-                                let pong_msg = format!("PONG {}\r\n", payload_str);
-                                if let Err(e) = writer.write_all(pong_msg.as_bytes()).await {
-                                    let _ = tx.send(IrcEvent::Error(e.to_string())).await;
-                                    break;
-                                }
+                tokio::select! {
+                    // --- 1. INCOMING FROM IRC SERVER ---
+                    line_res = lines.next_line() => {
+                        let line = match line_res {
+                            Ok(Some(l)) => l,
+                            Ok(None) => break, // Server closed connection
+                            Err(e) => {
+                                let _ = event_tx.send(IrcEvent::Error(e.to_string())).await;
+                                break;
                             }
+                        };
+
+                        // Auto-handle PINGs internally to keep connection alive
+                        if line.starts_with("PING") {
+                            let payload = line.trim_start_matches("PING ").to_string();
+                            let _ = writer.write_all(format!("PONG {}\r\n", payload).as_bytes()).await;
+                            // No need to emit Ping event, handled internally
                             continue;
                         }
 
-                        // Emit standard message event
-                        if tx.send(IrcEvent::Message(line)).await.is_err() {
+                        // Emit Connected event when RPL_WELCOME (001) is received
+                        if line.contains(" 001 ") {
+                            let _ = event_tx.send(IrcEvent::Connected).await;
+                        }
+
+                        // Parse PRIVMSGs: :nick!user@host PRIVMSG #channel :message
+                        if line.contains(" PRIVMSG ") {
+                          if let Some((sender, target, text)) = parse_privmsg(&line) {
+                              if sender != nick {
+                                  let _ = event_tx
+                                      .send(IrcEvent::Message {
+                                          sender: sender.to_string(),
+                                          target: target.to_string(),
+                                          content: text.to_string(),
+                                      })
+                                      .await;
+                              }
+                          }
+                        }
+                    }
+
+                    // --- 2. OUTGOING COMMANDS TO IRC SERVER ---
+                    Some(cmd) = cmd_rx.recv() => {
+                        let mut bytes = cmd.into_bytes();
+                        // IRC protocol requires lines terminated by CRLF (\r\n)
+                        bytes.extend_from_slice(b"\r\n");
+                        if let Err(e) = writer.write_all(&bytes).await {
+                            let _ = event_tx.send(IrcEvent::Error(e.to_string())).await;
                             break;
                         }
                     }
-                    // EVENT: Connection closed gracefully by remote end
-                    Ok(None) => {
-                        let _ = tx.send(IrcEvent::Closed).await;
-                        break;
-                    }
-                    // EVENT: Socket I/O error
-                    Err(err) => {
-                        let _ = tx.send(IrcEvent::Error(err.to_string())).await;
-                        let _ = tx.send(IrcEvent::Closed).await;
-                        break;
-                    }
                 }
             }
+
+            let _ = event_tx.send(IrcEvent::Closed).await;
         });
 
-        Ok(rx)
+        let handle = IrcClientHandle { cmd_tx };
+        Ok((handle, event_rx))
     }
+}
+
+/// A lightweight handle to send commands to the active IRC connection.
+#[derive(Clone)]
+pub struct IrcClientHandle {
+    cmd_tx: mpsc::Sender<String>,
+}
+
+impl IrcClientHandle {
+    /// Joins a target channel (e.g., `"#rust"`).
+    pub async fn join(&self, channel: &str, password: Option<String>) -> Result<()> {
+        self.cmd_tx
+            .send(match password {
+                Some(p) => format!("JOIN {} {}", channel, p),
+                None => format!("JOIN {}", channel),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send JOIN command: {}", e))
+    }
+
+    /// Sends a PRIVMSG to a target channel or user.
+    pub async fn send_message(&self, target: &str, message: &str) -> Result<()> {
+        // Strip newlines to adhere to IRC protocol single-line limit
+        let sanitized_msg = message.replace(['\r', '\n'], " ");
+        self.cmd_tx
+            .send(format!("PRIVMSG {} :{}", target, sanitized_msg))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send PRIVMSG command: {}", e))
+    }
+}
+
+/// Parses standard IRC PRIVMSG lines.
+/// Line format: `:nick!user@host PRIVMSG #channel :hello world`
+fn parse_privmsg(line: &str) -> Option<(&str, &str, &str)> {
+    if !line.starts_with(':') {
+        return None;
+    }
+
+    let mut parts = line[1..].splitn(2, " PRIVMSG ");
+    let prefix = parts.next()?;
+    let rest = parts.next()?;
+
+    let sender = prefix.split('!').next()?;
+
+    let mut rest_parts = rest.splitn(2, " :");
+    let target = rest_parts.next()?.trim();
+    let text = rest_parts.next()?;
+
+    Some((sender, target, text))
 }
 
 /// Builder for creating an [`IrcClient`].
@@ -158,8 +224,11 @@ impl IrcClientBuilder {
 #[derive(Debug, Clone)]
 pub enum IrcEvent {
     Connected,
-    Message(String),
-    Ping(String),
+    Message {
+        sender: String,
+        target: String,
+        content: String,
+    },
     Error(String),
     Closed,
 }
