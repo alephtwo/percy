@@ -5,6 +5,12 @@ use std::{fs, path::Path};
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub irc: IrcConfig,
+    pub discord: DiscordConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscordConfig {
+    pub token: String,
 }
 
 #[derive(Debug, Deserialize)]

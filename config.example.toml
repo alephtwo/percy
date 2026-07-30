@@ -1,3 +1,6 @@
+[discord]
+api_key = ""
+
 [irc]
 host = "irc.rizon.net"
 port = 6667

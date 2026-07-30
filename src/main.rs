@@ -1,4 +1,5 @@
 use crate::{
+    bridge::BridgeMessage,
     cli::Cli,
     config::Config,
     irc::{IrcClient, IrcEvent},
@@ -6,8 +7,10 @@ use crate::{
 use anyhow::Result;
 use clap::Parser;
 
+mod bridge;
 mod cli;
 mod config;
+mod discord;
 mod irc;
 
 #[tokio::main]
@@ -15,6 +18,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
 
+    // Channel 1: Discord -> IRC
+    let (irc_tx, irc_rx) = tokio::sync::mpsc::channel::<BridgeMessage>(100);
+    // Channel 2: IRC -> Discord
+    let (discord_tx, discord_rx) = tokio::sync::mpsc::channel::<BridgeMessage>(100);
+
+    // Get a discord client
+    let _discord = discord::get_client(&config.discord.token, discord_tx);
+
+    // Get an IRC client
     let irc = IrcClient::builder()
         .host(&config.irc.host)
         .port(config.irc.port)
