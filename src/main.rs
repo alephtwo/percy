@@ -131,7 +131,7 @@ async fn send_discord_to_irc(
             // --- INCOMING MESSAGES FROM DISCORD TO RELAY TO IRC ---
             Some(msg) = irc_rx.recv() => {
                 if msg.source == MessageSource::Discord {
-                    let text = format!("<{}> {}", msg.author, msg.content);
+                    let text = format!("<{}@discord> {}", msg.author, msg.content);
                     if let Err(e) = irc_handle.send_message(&config.channel.name, &text).await {
                         eprintln!("Failed to send message to IRC channel: {:?}", e);
                     }
