@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     let (discord_tx, discord_rx) = tokio::sync::mpsc::channel::<BridgeMessage>(100);
 
     // Build a Discord client, giving it the IRC tx channel so it can send messages to IRC
-    let mut discord = discord::get_client(&config.discord, irc_tx).await?;
+    let mut discord = discord::get_client(&config.discord, &cli.discord_token, irc_tx).await?;
     let discord_http = discord.http.clone();
 
     // Spawn tasks

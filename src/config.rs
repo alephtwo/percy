@@ -10,7 +10,6 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DiscordConfig {
-    pub token: String,
     pub channel_id: u64,
 }
 

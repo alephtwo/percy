@@ -16,11 +16,12 @@ use tokio::sync::mpsc;
 /// Creates a Discord client using the provided configuration and IRC bridge channel.
 pub async fn get_client(
     config: &DiscordConfig,
+    discord_token: &str,
     irc_tx: mpsc::Sender<BridgeMessage>,
 ) -> Result<Client> {
     let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    Client::builder(&config.token, intents)
+    Client::builder(discord_token, intents)
         .event_handler(DiscordHandler {
             irc_tx,
             channel_id: config.channel_id,

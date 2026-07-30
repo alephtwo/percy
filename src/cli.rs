@@ -1,12 +1,14 @@
-use std::path::PathBuf;
-
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
     #[arg(short, long, value_parser = validate_file_exists)]
     pub config: PathBuf,
+
+    #[arg(long, env = "DISCORD_TOKEN")]
+    pub discord_token: String,
 }
 
 /// Validate that the given file exists.
