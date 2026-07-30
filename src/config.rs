@@ -8,17 +8,26 @@ pub struct Config {
     pub discord: DiscordConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DiscordConfig {
     pub token: String,
+    pub channel_id: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct IrcConfig {
     pub host: String,
     pub port: u16,
+    pub channel: IrcChannelConfig,
+
     pub real_name: String,
     pub nick: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct IrcChannelConfig {
+    pub name: String,
+    pub password: Option<String>,
 }
 
 impl Config {
